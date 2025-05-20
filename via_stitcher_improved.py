@@ -19,7 +19,7 @@ class ViaStitcher(pcbnew.ActionPlugin):
         self.category = "配置"
         self.description = "選択したゾーンにVIAを均等に配置し、オプションでグループ化します"
         self.show_toolbar_button = True
-        self.icon_file_name = os.path.join(os.path.dirname(__file__), 'via_stitch_icon.png')
+        self.icon_file_name = os.path.join(os.path.dirname(__file__), 'via-stitcher-icon.png')
         
     def Run(self):
         try:
