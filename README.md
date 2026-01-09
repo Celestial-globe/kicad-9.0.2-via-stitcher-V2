@@ -1,8 +1,8 @@
-# KiCad VIAステッチングプラグイン V2.2.0
+# KiCad VIAステッチングプラグイン V2.3.0
 
 KiCadのPCBエディタ（Pcbnew）で選択された銅エリアにVIAを自動配置するプラグインです。熱伝導や電流伝導を改善するためのVIAステッチングを効率的に行うことができます。
 
-![VIAステッチャーの使用例](images/via_stitcher_v2.2.0.png)
+![VIAステッチャーの使用例](images/via_stitcher_v2.3.0.png)
 
 ## 📋 機能
 
