@@ -2,10 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-KiCad VIAステッチプラグイン（最適化版 V2.2.0）
+KiCad VIAステッチプラグイン（最適化版 V2.3.0）
 このプラグインは、KiCadのPCBエディタ(Pcbnew)で選択された銅エリアにVIAを自動配置します。
 熱伝導や電流伝導を改善するためのVIAステッチングを効率的に行うことができます。
 KiCad 9.0.2対応版 - 空間インデックス化とプログレスバー対応
+
+V2.3.0 修正点:
+- 他のネットのゾーンとの重なり部分へのVIA配置を回避
 
 V2.2.0 修正点:
 - トラック（配線）との衝突回避を追加
@@ -31,7 +34,7 @@ import traceback
 from datetime import datetime
 
 # プラグインのバージョン
-PLUGIN_VERSION = "2.2.0"
+PLUGIN_VERSION = "2.3.0"
 
 # デフォルト設定
 DEFAULT_SETTINGS = {
@@ -53,6 +56,8 @@ DEFAULT_SETTINGS = {
     "via_clearance": 0.25,  # VIA間クリアランス (mm)
     "track_clearance": 0.2, # トラックからのクリアランス (mm)
     "check_tracks": True,   # トラックとの衝突をチェック
+    # V2.3.0 新規追加
+    "check_other_zones": True,  # 他のネットのゾーンとの重なりをチェック
 }
 
 
@@ -248,15 +253,16 @@ def point_to_segment_distance(point, seg_start, seg_end):
 
 
 class BoardGeometryChecker:
-    """基板形状チェッカー - 基板外形、禁止領域、パッド、トラックなどをチェック"""
+    """基板形状チェッカー - 基板外形、禁止領域、パッド、トラック、他ゾーンなどをチェック"""
     
-    def __init__(self, board, via_size, pad_clearance, track_clearance, via_clearance):
+    def __init__(self, board, via_size, pad_clearance, track_clearance, via_clearance, target_net_code=None):
         self.board = board
         self.via_size = via_size
         self.via_radius = via_size / 2
         self.pad_clearance = pad_clearance
         self.track_clearance = track_clearance
         self.via_clearance = via_clearance
+        self.target_net_code = target_net_code  # V2.3.0: VIA配置対象のネットコード
         
         # パッドの空間インデックスを構築
         self.pad_index = PadSpatialIndex(int(via_size * 3))
@@ -272,9 +278,13 @@ class BoardGeometryChecker:
         # 禁止領域（Keepout Zone）のリストを取得
         self.keepout_zones = self._get_keepout_zones()
         
+        # V2.3.0: 他のネットのゾーンリストを取得
+        self.other_net_zones = self._get_other_net_zones()
+        
         print(f"パッド数: {self.pad_count}")
         print(f"トラック数: {self.track_count}")
         print(f"禁止領域数: {len(self.keepout_zones)}")
+        print(f"他ネットゾーン数: {len(self.other_net_zones)}")
         print(f"基板外形取得: {'成功' if self.board_outline else '失敗'}")
     
     def _build_pad_index(self):
@@ -396,6 +406,94 @@ class BoardGeometryChecker:
             print(f"禁止領域取得エラー: {e}")
         
         return keepout_zones
+    
+    def _get_other_net_zones(self):
+        """V2.3.0: 他のネットのゾーン（銅エリア）を取得"""
+        other_zones = []
+        
+        if self.target_net_code is None:
+            return other_zones
+        
+        try:
+            for zone in self.board.Zones():
+                try:
+                    # 禁止領域（ルールエリア）は除外
+                    is_rule_area = False
+                    if hasattr(zone, 'GetIsRuleArea'):
+                        is_rule_area = zone.GetIsRuleArea()
+                    elif hasattr(zone, 'IsRuleArea'):
+                        is_rule_area = zone.IsRuleArea()
+                    
+                    if is_rule_area:
+                        continue
+                    
+                    # 異なるネットのゾーンを収集
+                    zone_net_code = zone.GetNetCode()
+                    if zone_net_code != self.target_net_code and zone_net_code != 0:
+                        # ゾーン情報を保存
+                        zone_info = {
+                            'zone': zone,
+                            'net_code': zone_net_code,
+                            'net_name': zone.GetNetname(),
+                            'outline': None,
+                            'bbox': zone.GetBoundingBox()
+                        }
+                        
+                        # アウトラインを取得（存在する場合）
+                        try:
+                            zone_info['outline'] = zone.Outline()
+                        except:
+                            pass
+                        
+                        other_zones.append(zone_info)
+                        print(f"他ネットゾーン検出: {zone_info['net_name']}")
+                        
+                except Exception as e:
+                    print(f"ゾーン情報取得エラー: {e}")
+                    continue
+        except Exception as e:
+            print(f"他ネットゾーン取得エラー: {e}")
+        
+        return other_zones
+    
+    def is_point_in_other_zone(self, point):
+        """V2.3.0: 点が他のネットのゾーン内にあるかチェック
+        
+        Args:
+            point: チェックする位置
+        
+        Returns:
+            bool: 他のネットのゾーン内にある場合True
+        """
+        for zone_info in self.other_net_zones:
+            try:
+                # まずBoundingBoxで高速フィルタリング
+                bbox = zone_info['bbox']
+                if not (bbox.GetLeft() <= point.x <= bbox.GetRight() and
+                        bbox.GetTop() <= point.y <= bbox.GetBottom()):
+                    continue
+                
+                # アウトラインで正確に判定
+                outline = zone_info['outline']
+                if outline is not None:
+                    pt = pcbnew.VECTOR2I(int(point.x), int(point.y))
+                    if outline.Contains(pt):
+                        return True
+                else:
+                    # アウトラインがない場合はBoundingBoxで判定
+                    return True
+                    
+            except Exception as e:
+                # エラー時はBoundingBoxで判定
+                try:
+                    bbox = zone_info['bbox']
+                    if (bbox.GetLeft() <= point.x <= bbox.GetRight() and
+                        bbox.GetTop() <= point.y <= bbox.GetBottom()):
+                        return True
+                except:
+                    pass
+        
+        return False
     
     def is_point_in_board(self, point):
         """点が基板内にあるかチェック"""
@@ -519,7 +617,7 @@ class BoardGeometryChecker:
         return False
     
     def can_place_via(self, point, via_net_code=None, check_board=True, check_keepout=True, 
-                      check_pads=True, check_tracks=True):
+                      check_pads=True, check_tracks=True, check_other_zones=True):
         """VIAを配置できるかの総合チェック
         
         Returns:
@@ -532,6 +630,10 @@ class BoardGeometryChecker:
         # 禁止領域チェック
         if check_keepout and self.is_point_in_keepout(point):
             return False, "禁止領域内"
+        
+        # V2.3.0: 他ネットゾーンチェック
+        if check_other_zones and self.is_point_in_other_zone(point):
+            return False, "他ネットゾーン内"
         
         # パッド衝突チェック
         if check_pads and self.is_point_on_pad(point, via_net_code):
@@ -735,18 +837,21 @@ class ViaStitchingDialog(wx.Dialog):
         
         main_sizer.Add(clearance_sizer, 0, wx.ALL|wx.EXPAND, 5)
         
-        # 衝突回避オプション（V2.2.0で拡張）
+        # 衝突回避オプション（V2.2.0で拡張、V2.3.0で他ゾーン追加）
         collision_sizer = wx.StaticBoxSizer(wx.StaticBox(self, wx.ID_ANY, "衝突回避設定"), wx.VERTICAL)
         self.check_pads_checkbox = wx.CheckBox(self, wx.ID_ANY, "パッドとの衝突を回避")
         self.check_pads_checkbox.SetValue(True)
         self.check_tracks_checkbox = wx.CheckBox(self, wx.ID_ANY, "トラック（配線）との衝突を回避")  # V2.2.0新規
         self.check_tracks_checkbox.SetValue(True)
+        self.check_other_zones_checkbox = wx.CheckBox(self, wx.ID_ANY, "他のネットのゾーンとの重なりを回避")  # V2.3.0新規
+        self.check_other_zones_checkbox.SetValue(True)
         self.check_keepout_checkbox = wx.CheckBox(self, wx.ID_ANY, "禁止領域（Keepout）を回避")
         self.check_keepout_checkbox.SetValue(True)
         self.check_board_outline_checkbox = wx.CheckBox(self, wx.ID_ANY, "基板外形を考慮")
         self.check_board_outline_checkbox.SetValue(True)
         collision_sizer.Add(self.check_pads_checkbox, 0, wx.ALL, 5)
         collision_sizer.Add(self.check_tracks_checkbox, 0, wx.ALL, 5)  # V2.2.0新規
+        collision_sizer.Add(self.check_other_zones_checkbox, 0, wx.ALL, 5)  # V2.3.0新規
         collision_sizer.Add(self.check_keepout_checkbox, 0, wx.ALL, 5)
         collision_sizer.Add(self.check_board_outline_checkbox, 0, wx.ALL, 5)
         main_sizer.Add(collision_sizer, 0, wx.ALL|wx.EXPAND, 5)
@@ -809,6 +914,7 @@ class ViaStitchingDialog(wx.Dialog):
         self.check_keepout_checkbox.SetValue(self.settings.get("check_keepout", True))
         self.check_board_outline_checkbox.SetValue(self.settings.get("check_board_outline", True))
         self.check_tracks_checkbox.SetValue(self.settings.get("check_tracks", True))  # V2.2.0
+        self.check_other_zones_checkbox.SetValue(self.settings.get("check_other_zones", True))  # V2.3.0
         
         self.action_radio.SetSelection(0)
     
@@ -1003,6 +1109,7 @@ class ViaStitchingDialog(wx.Dialog):
             self.settings["check_board_outline"] = self.check_board_outline_checkbox.GetValue()
             self.settings["check_pads"] = self.check_pads_checkbox.GetValue()
             self.settings["check_tracks"] = self.check_tracks_checkbox.GetValue()  # V2.2.0
+            self.settings["check_other_zones"] = self.check_other_zones_checkbox.GetValue()  # V2.3.0
             
             save_settings(self.settings)
             self.EndModal(wx.ID_OK)
@@ -1039,6 +1146,7 @@ class ViaStitchingDialog(wx.Dialog):
         self.check_board_outline_checkbox.SetValue(DEFAULT_SETTINGS["check_board_outline"])
         self.check_pads_checkbox.SetValue(True)
         self.check_tracks_checkbox.SetValue(DEFAULT_SETTINGS["check_tracks"])  # V2.2.0
+        self.check_other_zones_checkbox.SetValue(DEFAULT_SETTINGS["check_other_zones"])  # V2.3.0
         
         self.update_preview()
     
@@ -1164,13 +1272,15 @@ class ViaStitchingPlugin(pcbnew.ActionPlugin):
         check_keepout = settings.get("check_keepout", True)
         check_board_outline = settings.get("check_board_outline", True)
         check_tracks = settings.get("check_tracks", True)  # V2.2.0
+        check_other_zones = settings.get("check_other_zones", True)  # V2.3.0
         
         # 空間インデックス初期化
         spatial_index = SpatialIndex(int(via_size * 1.5))
         
-        # 基板形状チェッカーの初期化（V2.2.0でトラッククリアランス追加）
+        # 基板形状チェッカーの初期化（V2.3.0でtarget_net_code追加）
         geometry_checker = BoardGeometryChecker(
-            board, via_size, pad_clearance, track_clearance, via_clearance
+            board, via_size, pad_clearance, track_clearance, via_clearance, 
+            target_net_code=net_code  # V2.3.0: 他ゾーン判定用
         )
         
         # 既存のVIAを空間インデックスに登録
@@ -1208,10 +1318,11 @@ class ViaStitchingPlugin(pcbnew.ActionPlugin):
             style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME
         )
         
-        # 統計情報（V2.2.0でトラック追加）
+        # 統計情報（V2.3.0で他ネットゾーン追加）
         skip_reasons = {
             "基板外": 0,
             "禁止領域内": 0,
+            "他ネットゾーン内": 0,  # V2.3.0新規
             "パッド上": 0,
             "トラック上": 0,  # V2.2.0新規
             "VIA近接": 0,
@@ -1228,13 +1339,14 @@ class ViaStitchingPlugin(pcbnew.ActionPlugin):
                         wx.MessageBox("処理がキャンセルされました", "情報", wx.OK | wx.ICON_INFORMATION)
                         return
                 
-                # 衝突チェック（V2.2.0でトラックチェック追加）
+                # 衝突チェック（V2.3.0で他ゾーンチェック追加）
                 can_place, reason = geometry_checker.can_place_via(
                     pos, net_code,
                     check_board=check_board_outline,
                     check_keepout=check_keepout,
                     check_pads=check_pads,
-                    check_tracks=check_tracks  # V2.2.0
+                    check_tracks=check_tracks,  # V2.2.0
+                    check_other_zones=check_other_zones  # V2.3.0
                 )
                 
                 if not can_place:
